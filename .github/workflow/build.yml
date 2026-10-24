@@ -1,0 +1,114 @@
+name: Build Yfit OS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Build Debian-based Yfit OS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+
+          docker run --rm --privileged \
+            -v "$PWD/output:/output" \
+            debian:bookworm \
+            bash -euxc '
+              export DEBIAN_FRONTEND=noninteractive
+
+              apt-get update
+              apt-get install -y \
+                live-build debootstrap \
+                squashfs-tools xorriso \
+                isolinux syslinux-common syslinux-utils \
+                grub-pc-bin grub-efi-amd64-bin mtools \
+                ca-certificates
+
+              mkdir -p /build
+              cd /build
+
+              lb config \
+                --mode debian \
+                --distribution bookworm \
+                --architectures amd64 \
+                --binary-images iso-hybrid \
+                --bootloaders "syslinux,grub-efi" \
+                --archive-areas "main contrib non-free non-free-firmware" \
+                --debian-installer false \
+                --iso-volume "YFIT_OS" \
+                --iso-application "Yfit OS Live" \
+                --bootappend-live "boot=live components hostname=yfit username=yfit"
+
+              mkdir -p config/package-lists
+              printf "%s\n" \
+                linux-image-amd64 \
+                live-boot \
+                live-config \
+                live-config-systemd \
+                systemd-sysv \
+                xorg \
+                xfce4 \
+                lightdm \
+                lightdm-gtk-greeter \
+                network-manager \
+                network-manager-gnome \
+                firefox-esr \
+                xfce4-terminal \
+                sudo \
+                dbus-x11 \
+                > config/package-lists/yfit.list.chroot
+
+              mkdir -p config/includes.chroot/etc
+              printf "Yfit OS 0.1 - Debian-based live system\n" \
+                > config/includes.chroot/etc/issue
+
+              mkdir -p config/includes.chroot/etc/skel/Desktop
+              printf "%s\n" \
+                "[Desktop Entry]" \
+                "Type=Application" \
+                "Name=Welcome to Yfit OS" \
+                "Exec=xfce4-terminal --hold -e \"cat /etc/yfit-release\"" \
+                "Icon=computer" \
+                "Terminal=false" \
+                > config/includes.chroot/etc/skel/Desktop/Welcome.desktop
+              chmod +x config/includes.chroot/etc/skel/Desktop/Welcome.desktop
+
+              printf "%s\n" \
+                "Welcome to Yfit OS 0.1" \
+                "A Debian-based Linux live desktop." \
+                "Experimental build. Not boot-tested." \
+                > config/includes.chroot/etc/yfit-release
+
+              lb build
+
+              cp live-image-amd64.hybrid.iso \
+                /output/Yfit-OS-amd64.iso
+
+              cd /output
+              sha256sum Yfit-OS-amd64.iso > SHA256SUMS
+            '
+
+      - name: Publish downloadable ISO
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="yfit-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+
+          gh release create "$TAG" \
+            output/Yfit-OS-amd64.iso \
+            output/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "Yfit OS — untested build ${GITHUB_RUN_NUMBER}" \
+            --notes "Experimental Debian-based amd64 live ISO. Not boot-tested. No installer included." \
+            --prerelease
